@@ -1,0 +1,83 @@
+# 自定义语义分割数据集 + DINOv3（冻结 backbone）+ SegFormer 式 neck + 分割头 训练配置
+# 相比 config-custom-linear-training.yaml：把单尺度 linear head 换成
+# “SegFormerNeck（融合 4 个中间层特征）+ 1x1 分类头”，输出 1/4 分辨率，掩码更锐利。
+# 改动点均用 “<==” 标注。
+#
+# 启动命令（单机单卡）：
+#   PYTHONPATH=. python dinov3/eval/segmentation/run.py \
+#     config=dinov3/eval/segmentation/configs/config-custom-segformer-training.yaml \
+#     model.pretrained_weights=/path/to/your/backbone.pth \
+#     datasets.root=/path/to/your/dataset \
+#     decoder_head.num_classes=<你的类别数> \
+#     output_dir=/path/to/output
+#
+# 单机多卡（例如 4 卡）：把 python 换成 torchrun --nproc_per_node=4
+
+# ---- backbone 加载方式（离线）----
+# dino_hub=模型名 + pretrained_weights=本地 .pth：架构由仓库内 hub 函数按名字逐参数搭好，
+# strict=True 加载，覆盖全部变体（含 plus 系列）。可选名见 dinov3/hub/backbones.py：
+#   dinov3_vits16 / dinov3_vits16plus / dinov3_vitb16 / dinov3_vitl16 /
+#   dinov3_vitl16plus / dinov3_vith16plus / dinov3_vit7b16 / dinov3_convnext_*
+model:
+  # dino_hub: dinov3_vitl16                          # <== 换成你要的模型名
+  config_file: 'dinov3/configs/dinov3_vits16.yaml'
+  pretrained_weights: '/data/haolei/LaHa/dinov3/pretrained/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'   # <== 换成你的本地 .pth 路径
+  # 联网模式（可选）：删掉 pretrained_weights 一行、仅留 dino_hub，自动下载架构+权重。
+
+bs: 4  # 每卡 batch size；ViT-L/512 分辨率显存紧张时先降到 2 <==
+n_gpus: 2  # 仅记录用，实际 GPU 数由启动方式（torchrun --nproc_per_node）决定
+metric_to_save: 'mIoU'
+model_dtype: FLOAT32  # 显存不足可改 BFLOAT16
+scheduler:
+  total_iter: 40000  # 总迭代数；数据少可调小（如 10000~20000） <==
+  type: 'WarmupOneCycleLR'
+  constructor_kwargs:
+    warmup_iters: 1500
+    warmup_ratio: 1e-6
+    final_div_factor: .inf
+    pct_start: 0
+    anneal_strategy: 'cos'
+    use_beta1: False
+    update_momentum: False
+optimizer:
+  lr: 1e-3
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 1e-3
+  gradient_clip: 'inf'
+datasets:
+  root: "/data/haolei/LaHa/datasets/lq"  # <== 必填：数据集根目录（建议用命令行 datasets.root=... 覆盖）
+  train: "CustomSegmentation:split=TRAIN"
+  val: "CustomSegmentation:split=VAL"
+train:
+  diceloss_weight: 0.0
+  celoss_weight: 1.0
+decoder_head:
+  type: "segformer"                    # <== SegFormer 式 neck + 分割头
+  backbone_out_layers: FOUR_EVEN_INTERVALS  # <== 取 4 个中间层喂 neck（ViT-L=[4,11,17,23]）
+  use_cls_token: False
+  use_batchnorm: True
+  use_backbone_norm: True
+  num_classes: 6                       # <== 必填：你的类别数（见下方 reduce_zero_label 说明）
+  neck_dim: 256                        # <== neck 每层投影 / 输出通道数
+  neck_out_stride: 4                   # <== neck 输出下采样倍率（4=更锐利；显存紧可设 8）
+  dropout: 0.1
+transforms:
+  train:
+    img_size: 512
+    random_img_size_ratio_range: [0.5, 2.0]
+    crop_size: [512, 512]
+    flip_prob: 0.5
+  eval:
+    img_size: 512
+eval:
+  compute_metric_per_image: False
+  # reduce_zero_label 与 num_classes 的关系（务必对齐你的掩码定义）：
+  #   - 掩码像素 0..C-1 全是有效类别         -> reduce_zero_label: False, num_classes: C
+  #   - 掩码 0=背景需忽略, 1..C 是有效类别    -> reduce_zero_label: True,  num_classes: C
+  reduce_zero_label: False  # <==
+  mode: "slide"
+  crop_size: 512
+  stride: 341
+  eval_interval: 5000
+  use_tta: False

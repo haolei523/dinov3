@@ -882,3 +882,33 @@ If you find this repository useful, please consider giving a star :star: and cit
   url={https://arxiv.org/abs/2508.10104},
 }
 ```
+
+
+micromamba activate dinov3   # 或 conda activate dinov3
+
+# 单机单卡
+PYTHONPATH=. python dinov3/eval/segmentation/run.py \
+  config=dinov3/eval/segmentation/configs/config-custom-linear-training.yaml \
+  output_dir=/path/to/output
+
+# 单机多卡（例：4 卡），把 python 换成 torchrun
+PYTHONPATH=. torchrun --nproc_per_node=4 dinov3/eval/segmentation/run.py \
+  config=dinov3/eval/segmentation/configs/config-custom-linear-training.yaml \
+  datasets.root=/path/to/your/dataset \
+  decoder_head.num_classes=<你的类别数> \
+  output_dir=/path/to/output
+
+PYTHONPATH=. python dinov3/eval/segmentation/run.py \
+  config=dinov3/eval/segmentation/configs/config-custom-segformer-training.yaml \
+  model.pretrained_weights=/path/to/backbone.pth \
+  datasets.root=/path/to/dataset decoder_head.num_classes=2 output_dir=/path/out
+
+PYTHONPATH=. python dinov3/eval/detection/run.py \
+  config=dinov3/eval/detection/configs/config-vitl16-detr-neck-training.yaml \
+  model.pretrained_weights=/path/to/backbone.pth \
+  datasets.root=/path/to/dataset output_dir=/path/out
+
+
+# 推理
+PYTHONPATH=. python3 segment_inference.py --input /data/haolei/LaHa/test/ --head-ckpt /data/haolei/LaHa/dinov3/model_final.pth --output-dir /data/haolei/LaHa/laha-pic/dinov3 --backbone-weights /data/haolei/LaHa/dinov3/pretrained/dinov3_vits16_pretrain_lvd1689m-08c60483.pth --config-file dinov3/configs/dinov3_vits16.yaml --num-classes 6
+

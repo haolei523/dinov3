@@ -30,6 +30,7 @@ from ..util.misc import NestedTensor
 from .position_encoding import build_position_encoding
 from .utils import LayerNorm2D
 from .windows import WindowsWrapper
+from dinov3.eval.segmentation.necks import SegFormerNeck
 
 logger = logging.getLogger("dinov3")
 
@@ -88,6 +89,50 @@ class DINOBackbone(nn.Module):
         return out
 
 
+class NeckBackbone(nn.Module):
+    """冻结 ViT + SegFormer 式 neck：取多个中间层特征，融合成单尺度特征图喂给 DETR。
+
+    输出 stride 与 patch_size 一致（neck 内不做上采样，out_stride=patch_size），因此 DETR 的
+    position encoding / proposal 几何与 DINOBackbone 完全一致；区别只是把“拼接多层通道”换成
+    “neck 融合”。neck 可训练，ViT 冻结（前向在 no_grad 下跑，不存 ViT 激活以省显存）。
+    """
+
+    def __init__(self, backbone_model: nn.Module, layers_to_use: Union[int, List], neck_dim: int = 256):
+        super().__init__()
+        self.backbone = backbone_model
+        # Important: we freeze the backbone
+        self.backbone.requires_grad_(False)
+        self.patch_size = self.backbone.patch_size
+        self.layers_to_use = layers_to_use
+
+        n_all_layers = self.backbone.n_blocks
+        blocks_to_take = (
+            range(n_all_layers - layers_to_use, n_all_layers) if isinstance(layers_to_use, int) else layers_to_use
+        )
+        embed_dims = getattr(self.backbone, "embed_dims", [self.backbone.embed_dim] * n_all_layers)
+        in_channels_list = [embed_dims[i] for i in range(n_all_layers) if i in blocks_to_take]
+
+        # out_stride=patch_size -> neck 不上采样，保持 DETR 几何不变
+        self.neck = SegFormerNeck(
+            in_channels_list=in_channels_list,
+            neck_dim=neck_dim,
+            out_stride=self.patch_size,
+            patch_size=self.patch_size,
+        )
+        self.strides = [self.patch_size]
+        self.num_channels = [neck_dim]
+
+    def forward(self, tensor_list: NestedTensor):
+        with torch.no_grad():  # backbone 冻结，无需存激活
+            xs = self.backbone.get_intermediate_layers(tensor_list.tensors, n=self.layers_to_use, reshape=True)
+        feat = self.neck(xs)
+
+        m = tensor_list.mask
+        assert m is not None
+        mask = F.interpolate(m[None].float(), size=feat.shape[-2:]).to(torch.bool)[0]
+        return [NestedTensor(feat, mask)]
+
+
 class BackboneWithPositionEncoding(nn.Sequential):
     def __init__(self, backbone, position_embedding):
         super().__init__(backbone, position_embedding)
@@ -103,9 +148,14 @@ class BackboneWithPositionEncoding(nn.Sequential):
 def build_backbone(backbone_model, args):
     position_embedding = build_position_encoding(args)
     train_backbone = False
-    backbone = DINOBackbone(
-        backbone_model, train_backbone, args.blocks_to_train, args.layers_to_use, args.backbone_use_layernorm
-    )
+    if getattr(args, "use_neck", False):
+        layers_to_use = args.neck_out_layers if args.neck_out_layers is not None else args.layers_to_use
+        logger.info(f"Using SegFormerNeck backbone (neck_dim={args.neck_dim}, layers={layers_to_use})")
+        backbone = NeckBackbone(backbone_model, layers_to_use, neck_dim=args.neck_dim)
+    else:
+        backbone = DINOBackbone(
+            backbone_model, train_backbone, args.blocks_to_train, args.layers_to_use, args.backbone_use_layernorm
+        )
     if args.n_windows_sqrt > 0:
         logger.info(f"Wrapping with {args.n_windows_sqrt} x {args.n_windows_sqrt} windows")
         backbone = WindowsWrapper(

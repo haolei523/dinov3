@@ -95,6 +95,8 @@ def test_segmentation(backbone, config):
             num_classes=config.decoder_head.num_classes,
             autocast_dtype=config.model_dtype.autocast_dtype,
             dropout=config.decoder_head.dropout,
+            neck_dim=config.decoder_head.neck_dim,
+            neck_out_stride=config.decoder_head.neck_out_stride,
         )
         state_dict = torch.load(config.load_from, map_location="cpu")["model"]
         _, _ = segmentation_model.load_state_dict(state_dict, strict=False)

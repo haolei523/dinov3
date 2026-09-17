@@ -1,0 +1,76 @@
+# 自定义语义分割数据集 + DINOv3（冻结 backbone）+ linear head 训练配置
+# 复制自 config-ade20k-linear-training.yaml，改动点均用 “<==” 标注。
+#
+# 启动命令（单机单卡）：
+#   PYTHONPATH=. python dinov3/eval/segmentation/run.py \
+#     config=dinov3/eval/segmentation/configs/config-custom-linear-training.yaml \
+#     datasets.root=/path/to/your/dataset \
+#     decoder_head.num_classes=<你的类别数> \
+#     output_dir=/path/to/output
+#
+# 单机多卡（例如 4 卡）：把 python 换成 torchrun --nproc_per_node=4
+
+# ---- backbone 加载方式（二选一）----
+model:
+  # 方式一（推荐，需联网）：torch.hub 名称，自动下载“架构 + 官方预训练权重”。
+  #   单机 1-8 卡可选：dinov3_vits16 / dinov3_vitb16 / dinov3_vitl16（越大越准也越吃显存）
+  # dino_hub: dinov3_vitl16
+  # 方式二（离线，用你已下载到本地的权重）：注释掉上面一行，改用下面两行。
+  #   注意 config_file 描述的架构必须与权重完全一致，否则会缺键/加载失败。
+  config_file: 'dinov3/configs/dinov3_vits16.yaml'
+  pretrained_weights: '/data/haolei/LaHa/dinov3/pretrained/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
+
+bs: 4  # 每卡 batch size；ViT-L/512 分辨率显存紧张时先降到 2 <==
+n_gpus: 2  # 仅记录用，实际 GPU 数由启动方式（torchrun --nproc_per_node）决定
+metric_to_save: 'mIoU'
+model_dtype: FLOAT32  # 显存不足可改 BFLOAT16
+scheduler:
+  total_iter: 40000  # 总迭代数；数据少可调小（如 10000~20000） <==
+  type: 'WarmupOneCycleLR'
+  constructor_kwargs:
+    warmup_iters: 1500
+    warmup_ratio: 1e-6
+    final_div_factor: .inf
+    pct_start: 0
+    anneal_strategy: 'cos'
+    use_beta1: False
+    update_momentum: False
+optimizer:
+  lr: 1e-3
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 1e-3
+  gradient_clip: 'inf'
+datasets:
+  root: "/data/haolei/LaHa/datasets/lq"  # <== 必填：数据集根目录（建议用命令行 datasets.root=... 覆盖）
+  train: "CustomSegmentation:split=TRAIN"
+  val: "CustomSegmentation:split=VAL"
+train:
+  diceloss_weight: 0.0
+  celoss_weight: 1.0
+decoder_head:
+  type: "linear"
+  backbone_out_layers: LAST
+  use_cls_token: False
+  use_batchnorm: True
+  use_backbone_norm: True
+  num_classes: 6  # <== 必填：你的类别数（见下方 reduce_zero_label 的说明）
+transforms:
+  train:
+    img_size: 512
+    random_img_size_ratio_range: [0.5, 2.0]
+    crop_size: [512, 512]
+    flip_prob: 0.5
+  eval:
+    img_size: 512
+eval:
+  compute_metric_per_image: False
+  # reduce_zero_label 与 num_classes 的关系（务必对齐你的掩码定义）：
+  #   - 掩码像素 0..C-1 全是有效类别         -> reduce_zero_label: False, num_classes: C
+  #   - 掩码 0=背景需忽略, 1..C 是有效类别    -> reduce_zero_label: True,  num_classes: C
+  reduce_zero_label: False  # <==
+  mode: "slide"
+  crop_size: 512
+  stride: 341
+  eval_interval: 5000
+  use_tta: False

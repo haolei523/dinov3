@@ -1,0 +1,107 @@
+# DINOv3（冻结 backbone）+ SegFormer 式 neck + DINO-DETR 检测头 从零训练配置
+# 相比 config-vitl16-detr-training.yaml：在冻结 ViT 与 DETR 之间插入一个轻量 SegFormerNeck，
+#   把“拼接多层特征”换成“neck 融合多层特征”，提升密集特征表达力。
+# neck 输出 stride 与 patch_size 一致（不上采样），因此 DETR 的几何/proposal 完全不变；
+#   neck 可训练、backbone 冻结，DETR 的 input_proj 会自动适配 neck_dim。
+# 默认按“单卡 ≤8GB 显存”配置，改动点用 “<==” 标注。
+#
+# 依赖（仓库未内置，需先装）：
+#   pip install pycocotools scipy
+#
+# 启动命令（单机单卡）：
+#   PYTHONPATH=. python dinov3/eval/detection/run.py \
+#     config=dinov3/eval/detection/configs/config-vitl16-detr-neck-training.yaml \
+#     model.pretrained_weights=/path/to/your/backbone.pth \
+#     datasets.root=/path/to/your/dataset \
+#     output_dir=/path/to/output
+#
+# 单机多卡（例如 4 卡）：把 python 换成 torchrun --nproc_per_node=4
+#
+# 数据目录约定（COCO 格式）：
+#   <datasets.root>/train/*.jpg  +  <datasets.root>/train/<train_ann>
+#   <datasets.root>/val/*.jpg    +  <datasets.root>/val/<val_ann>
+
+# ---- backbone 加载方式 ----
+# 离线（你的情况）：dino_hub=模型名 + pretrained_weights=本地 .pth。
+#   架构由仓库内 hub 函数按名字逐参数搭好，覆盖全部变体，无需 config yaml；
+#   可选名（见 dinov3/hub/backbones.py）：
+#     dinov3_vits16 / dinov3_vits16plus / dinov3_vitb16 / dinov3_vitl16 /
+#     dinov3_vitl16plus / dinov3_vith16plus / dinov3_vit7b16 / dinov3_convnext_*
+#   注意：.pth 必须是本仓库原生键名格式；HF transformers 格式需先转换，
+#         否则 strict=True 加载会直接报错（这正是我们要的，避免静默随机权重）。
+model:
+  dino_hub: dinov3_vitl16                          # <== 换成你要的模型名
+  pretrained_weights: /path/to/your/backbone.pth   # <== 换成你的本地 .pth 路径
+  # 联网模式（可选）：删掉 pretrained_weights 一行、仅留 dino_hub，自动下载架构+权重。
+
+bs: 1                 # 每卡 batch size；显存紧张先用 1，富余可加到 2 <==
+num_workers: 2        # dataloader worker 数
+model_dtype: BFLOAT16 # bf16 autocast 省显存；不想要混合精度可改 FLOAT32
+seed: 0
+
+# ---- 检测头结构（DINO-DETR + SegFormerNeck）----
+head:
+  num_classes: 91       # 运行时会被“标注里的真实类别数”自动覆盖，这里可不改
+  reparam: false        # <== 关键：false=输出归一化 cxcywh，与 SetCriterion 匹配；勿改 true
+  two_stage: true
+  aux_loss: true
+  dec_layers: 6
+  num_encoder_layers: 6
+  hidden_dim: 256       # DETR 头隐藏维度（input_proj 会把 neck_dim 投影到这里）
+  nheads: 8
+  dim_feedforward: 2048
+  num_queries_one2one: 300
+  num_queries_one2many: 0  # <== 关闭 hybrid matching 的 one2many 分支，省显存
+  k_one2many: 0            # <== 关闭 one2many 损失（与上面配套）
+  lambda_one2many: 1.0
+  topk: 100
+  n_windows_sqrt: 0        # 不做窗口切分（vitl16 常规分辨率无需，省显存）
+  backbone_use_layernorm: false
+  # ---- SegFormer 式 neck（本配置的核心开关）----
+  use_neck: true           # <== 打开 neck；置 false 则退回原始“拼接多层特征”的 DINOBackbone
+  neck_dim: 256            # <== neck 输出通道数（DETR input_proj 自动适配）
+  # neck_out_layers: null  # 取哪些 ViT 中间层喂 neck；不设则复用 layers_to_use（ViT-L=[5,11,17,23]）
+  matcher:                 # 匈牙利匹配代价权重
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+  loss:                    # SetCriterion 损失权重
+    focal_alpha: 0.25
+    cls_weight: 2.0
+    bbox_weight: 5.0
+    giou_weight: 2.0
+
+# ---- 数据集（COCO 格式）----
+datasets:
+  root: ""                        # <== 必填：数据集根目录（建议用命令行 datasets.root=... 覆盖）
+  train_img_dir: train            # 训练图片子目录名
+  train_ann: _annotations.coco.json  # 训练标注文件名（放在 train_img_dir 内）
+  val_img_dir: val
+  val_ann: _annotations.coco.json
+
+# ---- 数据增强 ----
+transforms:
+  scales: [480, 512, 544, 576, 608]  # 训练随机短边；显存不足可缩小到 [416, 448, 480] <==
+  max_size: 1024                     # 长边上限
+  crop_min: 400
+  crop_max: 600
+  flip_prob: 0.5
+  val_size: 512                      # 验证短边
+  # mean/std 默认用 0-1 的 ImageNet 统计量，一般不用改
+
+# ---- 优化器 / 调度器 ----
+optimizer:
+  lr: 1e-4            # 头从零训练，小 lr 更稳；数据多可适当调大
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 1e-4
+  gradient_clip: 0.1  # clip_grad_norm_ 的 max_norm
+scheduler:
+  total_epochs: 12          # 总训练轮数；数据少可调小到 6~8 <==
+  lr_drop_epochs: [10]      # 在第 10 轮把学习率乘以 gamma
+  gamma: 0.1
+
+# ---- 评测 ----
+eval:
+  eval_interval: 2   # 每 2 轮跑一次 COCOeval（AP/AP50/...）
+  topk: 100          # 后处理保留的框数

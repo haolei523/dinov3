@@ -30,7 +30,7 @@ def run_segmentation_with_dinov3(
     if config.load_from:
         logger.info("Testing model performance on a pretrained decoder head")
         return test_segmentation(backbone=backbone, config=config)
-    assert config.decoder_head.type == "linear", "Only linear head is supported for training"
+    # assert config.decoder_head.type == "linear", "Only linear head is supported for training"
     return train_segmentation(backbone=backbone, config=config)
 
 

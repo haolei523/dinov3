@@ -56,7 +56,7 @@ class DatasetConfig:
 
 @dataclass
 class DecoderConfig:
-    type: str = "m2f"  # Decoder type must be one of [linear, m2f]
+    type: str = "m2f"  # Decoder type must be one of [linear, segformer, m2f]
     backbone_out_layers: BackboneLayersSet = BackboneLayersSet.LAST
     use_batchnorm: bool = True
     use_cls_token: bool = False
@@ -64,6 +64,9 @@ class DecoderConfig:
     num_classes: int = 150  # Number of segmentation classes
     hidden_dim: int = 2048  # Hidden dimension, only used for M2F head
     dropout: float = 0.1  # Dropout ratio in the linear head during training
+    # SegFormer-style neck (only used when type == "segformer")
+    neck_dim: int = 256  # 每层投影后 / neck 输出的统一通道数
+    neck_out_stride: int = 4  # neck 输出特征的下采样倍率（分割用 4，掩码更锐利）
 
 
 @dataclass
