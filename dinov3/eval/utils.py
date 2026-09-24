@@ -76,7 +76,7 @@ def wrap_model(
 
 
 class ModelWithIntermediateLayers(nn.Module):
-    def __init__(self, feature_model, n, autocast_ctx, reshape=False, return_class_token=True):
+    def __init__(self, feature_model, n, autocast_ctx, reshape=False, return_class_token=True, inference_mode=True):
         super().__init__()
         self.feature_model = feature_model
         self.feature_model.eval()
@@ -84,9 +84,14 @@ class ModelWithIntermediateLayers(nn.Module):
         self.autocast_ctx = autocast_ctx
         self.reshape = reshape
         self.return_class_token = return_class_token
+        # inference_mode=True 产出的是 inference tensor，不能作为下游“可训练”模块的输入
+        # （会报 "Inference tensors cannot be saved for backward"）。当特征要喂给可训练的
+        # neck/head 时须置为 False，改用 torch.no_grad()（产出普通张量，可被 autograd 保存）。
+        self.inference_mode = inference_mode
+        self._no_grad_ctx = torch.inference_mode if inference_mode else torch.no_grad
 
     def forward(self, images):
-        with torch.inference_mode():
+        with self._no_grad_ctx():
             with self.autocast_ctx():
                 features = self.feature_model.get_intermediate_layers(
                     images,

@@ -147,16 +147,20 @@ def train_segmentation(
     backbone,
     config,
 ):
-    assert config.decoder_head.type == "linear", "Only linear head is supported for training"
+    assert config.decoder_head.type in ("linear", "segformer"), (
+        "Only linear / segformer heads are supported for training"
+    )
     # 1- load the segmentation decoder
     logger.info("Initializing the segmentation model")
     segmentation_model = build_segmentation_decoder(
         backbone,
         config.decoder_head.backbone_out_layers,
-        "linear",
+        config.decoder_head.type,
         num_classes=config.decoder_head.num_classes,
         autocast_dtype=config.model_dtype.autocast_dtype,
         dropout=config.decoder_head.dropout,
+        neck_dim=config.decoder_head.neck_dim,
+        neck_out_stride=config.decoder_head.neck_out_stride,
     )
     global_device = distributed.get_rank()
     local_device = torch.cuda.current_device()

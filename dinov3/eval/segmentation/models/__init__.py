@@ -11,6 +11,7 @@ import torch
 from dinov3.eval.segmentation.models.backbone.dinov3_adapter import DINOv3_Adapter
 from dinov3.eval.segmentation.models.heads.linear_head import LinearHead
 from dinov3.eval.segmentation.models.heads.mask2former_head import Mask2FormerHead
+from dinov3.eval.segmentation.models.heads.segformer_head import SegFormerSegHead
 from dinov3.eval.utils import ModelWithIntermediateLayers
 
 
@@ -81,6 +82,8 @@ def build_segmentation_decoder(
     num_classes=150,
     dropout=0.1,
     autocast_dtype=torch.float32,
+    neck_dim=256,
+    neck_out_stride=4,
 ):
     backbone_indices_to_use = _get_backbone_out_indices(backbone_model, backbone_out_layers)
     autocast_ctx = partial(torch.autocast, device_type="cuda", enabled=True, dtype=autocast_dtype)
@@ -122,6 +125,28 @@ def build_segmentation_decoder(
         decoder = LinearHead(
             in_channels=embed_dim,
             n_output_channels=num_classes,
+            dropout=dropout,
+        )
+    elif decoder_type == "segformer":
+        backbone_model = ModelWithIntermediateLayers(
+            backbone_model,
+            n=backbone_indices_to_use,
+            autocast_ctx=autocast_ctx,
+            reshape=True,
+            return_class_token=False,
+            inference_mode=False,  # 特征要喂给可训练 neck，须用 no_grad 而非 inference_mode
+        )
+        # Important: we freeze the backbone
+        backbone_model.requires_grad_(False)
+        embed_dim = backbone_model.feature_model.embed_dim
+        patch_size = backbone_model.feature_model.patch_size
+        in_channels_list = [embed_dim] * len(backbone_indices_to_use)
+        decoder = SegFormerSegHead(
+            in_channels_list=in_channels_list,
+            num_classes=num_classes,
+            neck_dim=neck_dim,
+            out_stride=neck_out_stride,
+            patch_size=patch_size,
             dropout=dropout,
         )
     else:
